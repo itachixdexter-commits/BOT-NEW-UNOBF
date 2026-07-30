@@ -1,8 +1,12 @@
 [phases.setup]
-nixPkgs = ["python3", "nodejs", "openjdk", "lua51", "lua52", "lua53", "lua54"]
+nixPkgs = ["python3", "openjdk", "lua5_1", "lua5_2", "lua5_3", "lua5_4", "wget"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt", "npm install -g unluac-js"]
+cmds = [
+    "pip install -r requirements.txt",
+    "mkdir -p tools",
+    "wget -O tools/unluac.jar https://github.com/the-maldonado/unluac/raw/master/unluac.jar"
+]
 
 [start]
 cmd = "python bot.py"
