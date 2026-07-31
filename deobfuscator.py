@@ -2,87 +2,114 @@ import subprocess
 import os
 import uuid
 import re
+import logging
+from typing import Dict, List, Any, Optional
+from luaparser import ast, astnodes
+
+# إعداد التسجيل الاحترافي
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("LuaProEngine")
+
+class ConstantTransformer(ast.ASTTransformer):
+    """محول AST لتبسيط العمليات الحسابية والمنطقية وتتبع القيم"""
+    def __init__(self):
+        super().__init__()
+        self.symbols = {}
+
+    def visit_LocalAssign(self, node):
+        node.values = [self.visit(v) for v in node.values]
+        # تتبع القيم الثابتة للمتغيرات المحلية (Constant Propagation)
+        if len(node.targets) == len(node.values):
+            for target, val in zip(node.targets, node.values):
+                if isinstance(target, astnodes.Name):
+                    if isinstance(val, (astnodes.Number, astnodes.String, astnodes.TrueExpr, astnodes.FalseExpr)):
+                        self.symbols[target.id] = val
+        return node
+
+    def visit_Name(self, node):
+        # استبدال المتغيرات بقيمها الثابتة
+        if node.id in self.symbols:
+            return self.symbols[node.id]
+        return node
+
+    def visit_BinaryOp(self, node):
+        node.left = self.visit(node.left)
+        node.right = self.visit(node.right)
+        if isinstance(node.left, astnodes.Number) and isinstance(node.right, astnodes.Number):
+            l, r = node.left.n, node.right.n
+            try:
+                if isinstance(node.op, astnodes.AddOp): return astnodes.Number(l + r)
+                if isinstance(node.op, astnodes.SubOp): return astnodes.Number(l - r)
+                if isinstance(node.op, astnodes.MultOp): return astnodes.Number(l * r)
+                if isinstance(node.op, astnodes.DivOp): return astnodes.Number(l / r)
+            except: pass
+        return node
+
+class VariableRenamer(ast.ASTTransformer):
+    """إعادة تسمية المتغيرات بناءً على النطاق بشكل بنيوي"""
+    def __init__(self):
+        super().__init__()
+        self.counter = 0
+        self.mapping = {}
+        self.reserved = {"string", "table", "math", "bit32", "pairs", "ipairs", "print", "load", "loadstring", "self"}
+
+    def visit_Name(self, node):
+        if node.id not in self.reserved and len(node.id) <= 2:
+            if node.id not in self.mapping:
+                self.counter += 1
+                self.mapping[node.id] = f"var_{self.counter}"
+            node.id = self.mapping[node.id]
+        return node
 
 class LuaDeobfuscator:
-    def __init__(self, work_dir="/tmp/lua_deobf"):
+    def __init__(self, work_dir: str = "/tmp/lua_deobf"):
         self.work_dir = work_dir
-        if not os.path.exists(self.work_dir):
-            os.makedirs(self.work_dir)
-        self.tools_dir = os.path.join(os.getcwd(), "tools")
+        if not os.path.exists(self.work_dir): os.makedirs(self.work_dir)
+        self.tools_dir = os.path.join(os.path.dirname(__file__), "tools")
 
-    def save_temp_file(self, content, extension=".lua"):
-        filename = f"{uuid.uuid4()}{extension}"
-        path = os.path.join(self.work_dir, filename)
-        with open(path, "wb") as f:
-            f.write(content)
-        return path
-
-    def run_tool(self, cmd):
+    def structural_analysis(self, text: str) -> str:
         try:
-            # محاولة تشغيل الأمر
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            return result.stdout if result.returncode == 0 else result.stderr
+            # تنظيف أولي للتعليقات
+            text = re.sub(r'--.*', '', text)
+            tree = ast.parse(text)
+            
+            # تطبيق المحولات البنيوية بشكل تكراري
+            for _ in range(3):
+                tree = ConstantTransformer().visit(tree)
+                tree = VariableRenamer().visit(tree)
+            
+            return ast.to_lua_source(tree)
         except Exception as e:
-            return f"Tool Error: {str(e)}"
+            logger.error(f"AST Error: {e}")
+            return text
 
-    def deobfuscate_all(self, content):
-        file_path = self.save_temp_file(content)
+    def deobfuscate_all(self, content: bytes) -> Dict[str, str]:
+        text = content.decode('utf-8', errors='ignore')
         results = {}
         
-        # 1. Unluac (أقوى أداة للبايت كود)
-        unluac_path = os.path.join(self.tools_dir, "unluac.jar")
-        if os.path.exists(unluac_path):
-            results['Unluac (Decompiler)'] = self.run_tool(["java", "-jar", unluac_path, file_path])
-        else:
-            results['Unluac'] = "unluac.jar not found in tools folder."
-
-        # 2. تحليل الـ VM (MoonSec, WeAreDevs, etc.)
-        results['Advanced VM Analysis'] = self.advanced_vm_analysis(content)
+        # 1. المحرك البنيوي (AST Analysis)
+        results['Structural_Analysis'] = self.structural_analysis(text)
         
-        # 3. محاولة التفكيك عبر نسخ Lua (التأكد من الأسماء الصحيحة في Linux)
-        for ver in ["5.1", "5.2", "5.3", "5.4"]:
-            # في بعض الأنظمة يكون الاسم luac5.1 وفي بعضها luac51
-            cmd = f"luac{ver}"
-            res = self.run_tool([cmd, "-l", "-l", file_path])
-            if "Tool Error" in res:
-                cmd = f"luac{ver.replace('.', '')}"
-                res = self.run_tool([cmd, "-l", "-l", file_path])
-            results[f'Lua {ver} Analysis'] = res
+        # 2. فك طبقات loadstring (Peeling)
+        peeled = text
+        for _ in range(5):
+            match = re.search(r'(?:loadstring|load)\s*\(\s*["\'](.*?)["\']\s*\)', peeled)
+            if match:
+                try:
+                    inner = match.group(1).encode().decode('unicode_escape')
+                    peeled = inner
+                except: break
+            else: break
+        if peeled != text:
+            results['Recursive_Peeling'] = peeled
 
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        # 3. الأدوات الخارجية (Unluac)
+        unluac_jar = os.path.join(self.tools_dir, "unluac.jar")
+        if os.path.exists(unluac_jar):
+            file_path = os.path.join(self.work_dir, f"{uuid.uuid4()}.lua")
+            with open(file_path, "wb") as f: f.write(content)
+            res = subprocess.run(["java", "-jar", unluac_jar, file_path], capture_output=True, text=True)
+            if res.returncode == 0: results['Bytecode_Decompilation'] = res.stdout
+            if os.path.exists(file_path): os.remove(file_path)
+
         return results
-
-    def advanced_vm_analysis(self, content):
-        try:
-            text = content.decode('utf-8', errors='ignore')
-            report = "-- [Mega VM Deobfuscator Engine]\n"
-            
-            # كشف الحمايات
-            protections = {
-                "MoonSec": ["MoonSec", "LUA_VM", "MoonV3"],
-                "Prometheus": ["Prometheus", "LPH_"],
-                "IronBrew/WeAreDevs": ["IronBrew", "IB_"],
-                "MoonVeil": ["MoonVeil", "MV_"]
-            }
-            
-            for name, keys in protections.items():
-                if any(k in text for k in keys):
-                    report += f"-- Detected Protection: {name}\n"
-
-            # استخراج النصوص المشفرة (Strings) - منطق محسن
-            # يبحث عن الأرقام المشفرة بـ XOR أو السلاسل النصية الطويلة
-            found_strings = re.findall(r'\"[^\"]{10,}\"|\'[^\']{10,}\'', text)
-            if found_strings:
-                report += "-- Found Potential Constants:\n"
-                for s in found_strings[:10]:
-                    report += f"-- {s}\n"
-
-            # استخراج قيم XOR
-            xor_keys = re.findall(r'(\d{1,3})\s*\^\s*(\d{1,3})', text)
-            if xor_keys:
-                report += f"-- Found {len(xor_keys)} potential XOR operations.\n"
-
-            return report + "\n-- Static Analysis Complete. If result is empty, script might be double-obfuscated."
-        except:
-            return "-- Analysis Failed."
