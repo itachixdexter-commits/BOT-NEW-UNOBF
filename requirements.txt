@@ -1,7 +1,7 @@
-Flask==3.0.3
-gunicorn==23.0.0
+discord.py==2.4.0
 
 luaparser==3.3.0
 
 requests==2.32.3
+
 typing_extensions==4.12.2
