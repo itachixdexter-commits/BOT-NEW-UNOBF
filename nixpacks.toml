@@ -1,11 +1,19 @@
 [phases.setup]
-nixPkgs = ["python3", "openjdk", "lua5_1", "lua5_2", "lua5_3", "lua5_4", "wget"]
+nixPkgs = [
+  "python313",
+  "python313Packages.pip",
+  "jdk17",
+  "lua",
+  "lua51Packages.lua",
+  "lua52",
+  "lua53",
+  "lua54"
+]
 
 [phases.install]
 cmds = [
-    "pip install -r requirements.txt",
-    "mkdir -p tools",
-    "wget -O tools/unluac.jar https://github.com/the-maldonado/unluac/raw/master/unluac.jar"
+  "python -m pip install --upgrade pip",
+  "pip install -r requirements.txt"
 ]
 
 [start]
